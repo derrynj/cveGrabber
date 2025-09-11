@@ -1,0 +1,32 @@
+email:
+  smtp_server: "smtp.yourrelay.local"
+  smtp_port: 25
+  auth_type: "tls"       # options: none, tls, ssl
+  smtp_user: ""          # optional username if auth needed
+  smtp_pass: ""          # optional password if auth needed
+
+  realtime_recipients:
+    - "soc@example.com"     # SOC/mailbox that wants realtime alerts + errors
+  digest_recipients:
+    - "alerts@example.com"  # team mailboxes for daily digest
+    - "it-team@example.com"
+
+  email_from: "cve-alerts@example.com"
+  subject_template: "[CVE Digest] {count} New CVEs ({date})"
+
+logging:
+  log_file: "/var/log/cve_alert.log"
+  log_level: "INFO"       # DEBUG, INFO, WARNING, ERROR
+  rotation: "daily"       # options: daily, size, none
+  backup_count: 7         # if rotation enabled
+  max_size_mb: 5          # only used if rotation=size
+
+filters:
+  products:
+    - vendor: "microsoft"
+      product: "office"
+    - vendor: "sonicwall"
+      product: "*"
+    - vendor: "fortinet"
+      product: "fortigate"
+  min_cvss: 7.0
