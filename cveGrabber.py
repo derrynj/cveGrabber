@@ -68,13 +68,18 @@ def load_config():
         return yaml.safe_load(f)
 
 def load_seen():
+    seen = {}
     if STATE_FILE.exists():
-        return set(STATE_FILE.read_text().splitlines())
-    return set()
+        for line in STATE_FILE.read_text().splitlines():
+            if "|" in line:
+                cid, mod = line.strip().split("|", 1)
+                seen[cid] = mod
+    return seen
 
 def save_seen(seen):
-    STATE_FILE.write_text("\n".join(seen))
-
+    with STATE_FILE.open("w") as f:
+        for cid, mod in seen.items():
+            f.write(f"{cid}|{mod}\n")
 
 # ---------------- Email ----------------
 def send_email(subject, html_body, recipients, config):
@@ -278,17 +283,17 @@ def cve_matches_products(cve, products):
 
 def severity_badge(cvss):
     if cvss is None:
-        return '<span style="background:#999;color:white;padding:2px 6px;border-radius:4px;">N/A</span>'
+        return '<span class="badge na">N/A</span>'
     score = float(cvss)
     if score >= 9.0:
-        return f'<span style="background:#d32f2f;color:white;padding:2px 6px;border-radius:4px;">Critical ({score})</span>'
+        return f'<span class="badge critical">Critical {score}</span>'
     elif score >= 7.0:
-        return f'<span style="background:#f57c00;color:white;padding:2px 6px;border-radius:4px;">High ({score})</span>'
+        return f'<span class="badge high">High {score}</span>'
     elif score >= 4.0:
-        return f'<span style="background:#fbc02d;color:black;padding:2px 6px;border-radius:4px;">Medium ({score})</span>'
+        return f'<span class="badge medium">Medium {score}</span>'
     elif score > 0.0:
-        return f'<span style="background:#388e3c;color:white;padding:2px 6px;border-radius:4px;">Low ({score})</span>'
-    return '<span style="background:#999;color:white;padding:2px 6px;border-radius:4px;">N/A</span>'
+        return f'<span class="badge low">Low {score}</span>'
+    return '<span class="badge na">N/A</span>'
 
 
 def parse_and_alert(config, days=1, digest_mode=False):
@@ -297,7 +302,9 @@ def parse_and_alert(config, days=1, digest_mode=False):
     if not data:
         return
 
-    grouped_entries = defaultdict(list)
+    new_entries = defaultdict(list)
+    updated_entries = defaultdict(list)
+
     metrics["cves_found"] = 0
     metrics["cves_sent"] = 0
     metrics["cves_skipped"] = 0
@@ -306,11 +313,11 @@ def parse_and_alert(config, days=1, digest_mode=False):
         cve = item["cve"]
         cve_id = cve["id"]
         published = cve["published"]
+        modified = cve["lastModified"]
 
         desc_list = cve.get("descriptions", [])
         description = desc_list[0]["value"] if desc_list else "No description"
 
-        # Score
         cvss_score = None
         metricsBlock = cve.get("metrics", {})
         for key in ["cvssMetricV31", "cvssMetricV30", "cvssMetricV2"]:
@@ -319,8 +326,6 @@ def parse_and_alert(config, days=1, digest_mode=False):
                 break
 
         metrics["cves_found"] += 1
-        if cve_id in seen:
-            continue
 
         vendor = cve_matches_products(cve, config["filters"]["products"])
         if not vendor:
@@ -331,57 +336,90 @@ def parse_and_alert(config, days=1, digest_mode=False):
             metrics["cves_skipped"] += 1
             continue
 
+        # Determine status (new vs updated)
+        if cve_id not in seen:
+            status = "new"
+            seen[cve_id] = modified
+        else:
+            if modified > seen[cve_id]:
+                status = "updated"
+                seen[cve_id] = modified
+            else:
+                continue
+
         badge = severity_badge(cvss_score)
         references = "".join(
             f'<li><a href="{ref.get("url","")}">{ref.get("url","")}</a></li>'
             for ref in cve.get("references", []) if "url" in ref
         )
         entry_html = f"""
-        <div style="margin-bottom:20px;border-bottom:1px solid #ccc;padding-bottom:10px;">
-          <h3 style="margin:0;">{cve_id}</h3>
-          <p><strong>Vendor:</strong> {vendor.title()}<br>
-          <strong>Published:</strong> {published}<br>
-          <strong>Severity:</strong> {badge}</p>
+        <div class="cve-entry {'updated' if status=='updated' else ''}">
+          <div class="cve-header">{cve_id} {badge}</div>
+          <p><b>Vendor:</b> {vendor.title()}<br>
+             <b>Published:</b> {published}<br>
+             <b>Last Modified:</b> {modified}</p>
           <p>{description}</p>
-          <p><strong>References:</strong></p>
+          <b>References:</b>
           <ul>{references}</ul>
         </div>
         """
 
-        if digest_mode:
-            grouped_entries[vendor.title()].append(entry_html)
-            metrics["cves_sent"] += 1
+        if status == "new":
+            new_entries[vendor.title()].append(entry_html)
         else:
-            subject = f"New CVE Alert: {cve_id}"
-            send_email(subject, entry_html, config["email"]["realtime_recipients"], config)
-            metrics["cves_sent"] += 1
-
-        seen.add(cve_id)
+            updated_entries[vendor.title()].append(entry_html)
 
     save_seen(seen)
 
-    if digest_mode and grouped_entries:
+    # Only digest mode groups/HTML sends
+    if digest_mode and (new_entries or updated_entries):
         today = datetime.now().strftime("%Y-%m-%d")
-        total_cves = sum(len(v) for v in grouped_entries.values())
+        total = sum(len(v) for v in new_entries.values()) + sum(len(v) for v in updated_entries.values())
         subject_template = config["email"].get(
-            "subject_template", "[CVE Digest] {count} New CVEs ({date})"
+            "subject_template", "[CVE Digest] {count} New/Updated CVEs ({date})"
         )
-        subject = subject_template.format(count=total_cves, date=today)
+        subject = subject_template.format(count=total, date=today)
 
-        sections = "".join(f"<h2>{vendor}</h2>{''.join(entries)}"
-                           for vendor, entries in grouped_entries.items())
+        sections = ""
+        if new_entries:
+            sections += "<h2>New CVEs</h2>"
+            for vendor, entries in new_entries.items():
+                sections += f"<h3>{vendor}</h3>{''.join(entries)}"
+        if updated_entries:
+            sections += "<h2>Updated CVEs</h2>"
+            for vendor, entries in updated_entries.items():
+                sections += f"<h3>{vendor}</h3>{''.join(entries)}"
 
         html_body = f"""
-        <html><body style="font-family:Arial,sans-serif;line-height:1.5;">
-        <h1>Daily CVE Digest</h1>
-        <p>Showing CVEs from the past {days} day(s), grouped by vendor.</p>
-        {sections}
-        </body></html>
+        <html>
+        <head>
+          <style>
+            body {{ font-family: Arial, sans-serif; line-height:1.5; color:#333; }}
+            h1 {{ color:#2e3b4e; }}
+            h2 {{ margin-top:30px; border-bottom:2px solid #eee; padding-bottom:5px; }}
+            .cve-entry {{ border:1px solid #ddd; margin:10px 0; padding:10px;
+                          border-radius:6px; background:#fafafa; }}
+            .cve-entry.updated {{ border-left:4px solid #2196f3; background:#f5faff; }}
+            .cve-header {{ font-weight:bold; font-size:14px; color:#1a237e; margin-bottom:5px; }}
+            .badge {{ padding:2px 6px; border-radius:4px; font-weight:bold; font-size:12px; }}
+            .critical {{ background:#d32f2f; color:white; }}
+            .high {{ background:#f57c00; color:white; }}
+            .medium {{ background:#fbc02d; color:black; }}
+            .low {{ background:#388e3c; color:white; }}
+            .na {{ background:#9e9e9e; color:white; }}
+            ul {{ margin:5px 0 5px 15px; }}
+          </style>
+        </head>
+        <body>
+          <h1>Daily CVE Digest</h1>
+          <p>Showing CVEs from the past {days} day(s).</p>
+          {sections}
+        </body>
+        </html>
         """
 
         send_email(subject, html_body, config["email"]["digest_recipients"], config)
-        logging.info(f"Digest with {total_cves} CVEs sent")
-
+        logging.info(f"Digest sent with {total} items ({sum(len(v) for v in new_entries.values())} new, {sum(len(v) for v in updated_entries.values())} updated)")
 
 # ---------------- Main ----------------
 def main():
