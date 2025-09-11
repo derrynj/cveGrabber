@@ -416,7 +416,7 @@ def parse_and_alert(config, days=1, digest_mode=False):
           </style>
         </head>
         <body>
-          <h1>Daily CVE Digest</h1>
+          <h1>CVE Digest</h1>
           <p>Showing CVEs from the past {days} day(s).</p>
           {sections}
         </body>
