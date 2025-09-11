@@ -184,21 +184,56 @@ def dump_cpes(config, days=1):
 # ---------------- CVE Handling ----------------
 def fetch_recent_cves(days=1):
     try:
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow().replace(tzinfo=timezone.utc)
         start = now - timedelta(days=days)
-        params = {
-            "pubStartDate": start.isoformat(timespec="milliseconds"),
-            "pubEndDate": now.isoformat(timespec="milliseconds"),
-            "resultsPerPage": 200,
-        }
-        response = requests.get(NVD_API, params=params, timeout=30)
-        response.raise_for_status()
-        return response.json()
+
+        all_cves = {"vulnerabilities": []}
+
+        # NVD safe window — don't query bigger than ~90 days per request
+        step = timedelta(days=90)
+        chunk_start = start
+
+        while chunk_start < now:
+            chunk_end = min(chunk_start + step, now)
+            logging.debug(f"Fetching CVEs from {chunk_start} to {chunk_end}")
+
+            start_index = 0
+            page_size = 2000  # NVD max
+
+            while True:
+                params = {
+                    "pubStartDate": chunk_start.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "pubEndDate": chunk_end.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "resultsPerPage": page_size,
+                    "startIndex": start_index,
+                }
+
+                response = requests.get(NVD_API, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+
+                vulns = data.get("vulnerabilities", [])
+                logging.debug(f"Chunk {chunk_start}–{chunk_end}, got {len(vulns)} results (index {start_index}).")
+
+                all_cves["vulnerabilities"].extend(vulns)
+
+                # stop paging if fewer than page_size
+                if len(vulns) < page_size:
+                    break
+
+                start_index += page_size
+
+            # move to next time chunk
+            chunk_start = chunk_end
+
+        logging.info(f"Fetched total {len(all_cves['vulnerabilities'])} CVEs over {days} days.")
+        return all_cves
+
     except Exception as e:
         msg = f"Error fetching CVEs from NVD: {e}"
         logging.error(msg, exc_info=True)
         log_warnings.append(msg)
-        return {}
+        return {"vulnerabilities": []}
 
 def cve_matches_products(cve, products):
     try:
