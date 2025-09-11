@@ -3,6 +3,7 @@ import smtplib
 import yaml
 import argparse
 import logging
+import os
 from logging.handlers import TimedRotatingFileHandler, RotatingFileHandler
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
