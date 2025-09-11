@@ -24,7 +24,8 @@ logging:
 filters:
   products:
     - vendor: "microsoft"
-      product: "office"
+      product: "office" # OR ["office", "windows 11", "windows 10"] - Wildcards accepted
+      version: ["2019", "365"] # match either Office 2019 or 365. Optional, wildcards accepted.
     - vendor: "sonicwall"
       product: "*"
     - vendor: "fortinet"

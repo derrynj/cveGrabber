@@ -179,12 +179,32 @@ def cve_matches_products(cve, products):
             for node in conf.get("nodes", []):
                 for match in node.get("cpeMatch", []):
                     cpe_uri = match.get("criteria", "").lower()
+                    parts = cpe_uri.split(":")
+                    if len(parts) < 6:
+                        continue
+
+                    cpe_vendor = parts[3]          # e.g. microsoft
+                    cpe_product = parts[4]         # e.g. windows_10
+                    cpe_version = parts[5]         # e.g. 21h2 (or "-" meaning all versions)
+
                     for p in products:
                         vendor = p["vendor"].lower()
-                        product = p["product"].lower()
-                        if f":{vendor}:" in cpe_uri:
-                            if product == "*" or f":{product}:" in cpe_uri:
-                                return vendor
+                        prods = p["product"]
+                        vers = p.get("version", "*")  # optional, default all
+
+                        # normalize to lists
+                        if isinstance(prods, str):
+                            prods = [prods]
+                        if isinstance(vers, str):
+                            vers = [vers]
+
+                        if cpe_vendor == vendor:
+                            for prod in prods:
+                                if prod == "*" or (prod.endswith("*") and cpe_product.startswith(prod[:-1])) or (cpe_product == prod.lower()):
+                                    # Now check version
+                                    for v in vers:
+                                        if v == "*" or (v.endswith("*") and cpe_version.startswith(v[:-1])) or (cpe_version == v.lower()) or (cpe_version in ["-", ""] and v == "*"):
+                                            return vendor
     except Exception as e:
         msg = f"Error parsing CVE {cve.get('id','unknown')}: {e}"
         logging.error(msg, exc_info=True)
