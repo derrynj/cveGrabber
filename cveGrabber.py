@@ -152,6 +152,34 @@ def send_error_report(config):
     send_email(subject, html_body, recipients, config)
     ERROR_STATE_FILE.write_text(today)
 
+# --------- Dump cpes for testing ------------
+def dump_cpes(config, days=1):
+    data = fetch_recent_cves(days)
+    if not data:
+        return
+
+    unique_cpes = set()
+
+    for item in data.get("vulnerabilities", []):
+        cve = item["cve"]
+        cve_id = cve["id"]
+
+        for conf in cve.get("configurations", []):
+            for node in conf.get("nodes", []):
+                for match in node.get("cpeMatch", []):
+                    cpe_uri = match.get("criteria", "").lower()
+                    parts = cpe_uri.split(":")
+                    if len(parts) < 6:
+                        continue
+
+                    cpe_vendor = parts[3]
+                    cpe_product = parts[4]
+                    cpe_version = parts[5]
+                    unique_cpes.add((cpe_vendor, cpe_product, cpe_version))
+
+    print("\n📋 Unique Vendor:Product:Version tuples in last", days, "days:\n")
+    for vendor, product, version in sorted(unique_cpes):
+        print(f"{vendor:15} {product:25} {version}")
 
 # ---------------- CVE Handling ----------------
 def fetch_recent_cves(days=1):
@@ -326,6 +354,7 @@ def main():
     parser = argparse.ArgumentParser(description="CVE Alert Script")
     parser.add_argument("--digest", action="store_true", help="Run in digest mode (daily summary)")
     parser.add_argument("--realtime", action="store_true", help="Run in realtime alert mode (per CVE)")
+    parser.add_argument("--dump-cpes", action="store_true", help="Dump vendor:product:version combinations")
     parser.add_argument("--days", type=int, default=1, help="How many past days of CVEs to query (default=1)")
     args = parser.parse_args()
 
@@ -333,12 +362,14 @@ def main():
     setup_logging(config)
 
     try:
-        if args.digest:
+        if args.dump_cpes:
+            dump_cpes(config, days=args.days)
+        elif args.digest:
             parse_and_alert(config, days=args.days, digest_mode=True)
         elif args.realtime:
             parse_and_alert(config, days=args.days, digest_mode=False)
         else:
-            logging.warning("No mode selected. Use --digest or --realtime.")
+            logging.warning("No mode selected. Use --digest, --realtime, or --dump-cpes.")
     except Exception as e:
         msg = f"Fatal error in main(): {e}"
         logging.critical(msg, exc_info=True)
@@ -349,7 +380,6 @@ def main():
                 send_error_report(config)
         except Exception as e:
             logging.error(f"Failed sending error report: {e}", exc_info=True)
-
 
 if __name__ == "__main__":
     main()
