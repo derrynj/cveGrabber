@@ -384,11 +384,16 @@ def parse_and_alert(config, days=1, digest_mode=False):
         if new_entries:
             sections += "<h2>New CVEs</h2>"
             for vendor, entries in new_entries.items():
-                sections += f"<h3>{vendor}</h3>{''.join(entries)}"
+                sections += f"<h3>{vendor}</h3>"
+                for _, html in sorted(entries, key=lambda x: x[0], reverse=True):
+                    sections += html
+
         if updated_entries:
             sections += "<h2>Updated CVEs</h2>"
             for vendor, entries in updated_entries.items():
-                sections += f"<h3>{vendor}</h3>{''.join(entries)}"
+                sections += f"<h3>{vendor}</h3>"
+                for _, html in sorted(entries, key=lambda x: x[0], reverse=True):
+                    sections += html
 
         html_body = f"""
         <html>
