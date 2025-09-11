@@ -18,7 +18,7 @@ A Python script to monitor and alert on new and updated Common Vulnerabilities a
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/cveGrabber.git
+   git clone https://github.com/derrynj/cveGrabber.git
    cd cveGrabber
    ```
 
@@ -132,3 +132,5 @@ This project is licensed under the GNU General Public License v3.0 - see the COP
 ## Disclaimer
 
 This tool is provided as-is for monitoring CVEs. Always verify CVE information from official sources and assess the impact on your environment before taking action.
+
+The majority of this repo was built with Generative AI models. Code has been checked for functionality, not sensibility or efficiency.
