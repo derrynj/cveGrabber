@@ -174,7 +174,7 @@ def fetch_recent_cves(days=1):
 
 def cve_matches_products(cve, products):
     try:
-        configs = cve["cve"].get("configurations", [])
+        configs = cve.get("configurations", [])
         for conf in configs:
             for node in conf.get("nodes", []):
                 for match in node.get("cpeMatch", []):
