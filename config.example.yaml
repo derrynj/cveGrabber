@@ -1,14 +1,19 @@
 email:
   smtp_server: "smtp.yourrelay.local"
   smtp_port: 25
-  auth_type: "tls"       # options: none, tls, ssl
-  smtp_user: ""          # optional username if auth needed
-  smtp_pass: ""          # optional password if auth needed
+  # options: none, tls, ssl
+  auth_type: "tls"
+  # optional username if auth needed
+  smtp_user: ""
+  # optional password if auth needed
+  smtp_pass: ""
 
   realtime_recipients:
-    - "soc@example.com"     # SOC/mailbox that wants realtime alerts + errors
+    # SOC/mailbox that wants realtime alerts + errors
+    - "soc@example.com"
   digest_recipients:
-    - "alerts@example.com"  # team mailboxes for daily digest
+    # team mailboxes for daily digest
+    - "alerts@example.com"
     - "it-team@example.com"
 
   email_from: "cve-alerts@example.com"
@@ -16,16 +21,22 @@ email:
 
 logging:
   log_file: "/var/log/cve_alert.log"
-  log_level: "INFO"       # DEBUG, INFO, WARNING, ERROR
-  rotation: "daily"       # options: daily, size, none
-  backup_count: 7         # if rotation enabled
-  max_size_mb: 5          # only used if rotation=size
+  # DEBUG, INFO, WARNING, ERROR
+  log_level: "INFO"
+  # options: daily, size, none
+  rotation: "daily"
+  # if rotation enabled
+  backup_count: 7
+  # only used if rotation=size
+  max_size_mb: 5
 
 filters:
   products:
     - vendor: "microsoft"
-      product: "office" # OR ["office", "windows 11", "windows 10"] - Wildcards accepted
-      version: ["2019", "365"] # match either Office 2019 or 365. Optional, wildcards accepted.
+      # OR ["office", "windows 11", "windows 10"] - Wildcards accepted
+      product: "office"
+      # match either Office 2019 or 365. Optional, wildcards accepted.
+      version: ["2019", "365"]
     - vendor: "sonicwall"
       product: "*"
     - vendor: "fortinet"
