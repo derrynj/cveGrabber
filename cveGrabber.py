@@ -10,10 +10,11 @@ from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+script_dir = os.path.dirname(os.path.abspath(__file__))
 
-CONFIG_FILE = "config.yaml"
-STATE_FILE = Path("seen_cves_cpe.txt")
-ERROR_STATE_FILE = Path("error_report_state.txt")
+CONFIG_FILE = os.path.join(script_dir, "config.yaml")
+STATE_FILE = Path(os.path.join(script_dir, "seen_cves_cpe.txt"))
+ERROR_STATE_FILE = Path(os.path.join(script_dir, "error_report_state.txt"))
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
 log_warnings = []  # track runtime/logging warnings
@@ -24,6 +25,8 @@ metrics = {"cves_found": 0, "cves_sent": 0, "cves_skipped": 0}
 def setup_logging(config):
     log_cfg = config.get("logging", {})
     log_file = log_cfg.get("log_file", "cve_alert.log")
+    if not os.path.isabs(log_file):
+        log_file = os.path.join(script_dir, log_file)
     log_level = log_cfg.get("log_level", "INFO").upper()
     rotation = log_cfg.get("rotation", "daily")
     backup_count = log_cfg.get("backup_count", 7)
