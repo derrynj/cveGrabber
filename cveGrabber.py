@@ -189,6 +189,24 @@ def dump_cpes(config, days=1):
     print("\n📋 Unique Vendor:Product:Version tuples in last", days, "days:\n")
     for vendor, product, version in sorted(unique_cpes):
         print(f"{vendor:15} {product:25} {version}")
+    
+    # Export to CSV file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_file = os.path.join(script_dir, f"cpe_export_{days}days_{timestamp}.csv")
+    
+    try:
+        with open(csv_file, "w", encoding="utf-8") as f:
+            f.write("vendor,product,version\n")
+            for vendor, product, version in sorted(unique_cpes):
+                # Escape commas in fields
+                vendor_escaped = f'"{vendor}"' if "," in vendor else vendor
+                product_escaped = f'"{product}"' if "," in product else product
+                version_escaped = f'"{version}"' if "," in version else version
+                f.write(f"{vendor_escaped},{product_escaped},{version_escaped}\n")
+        
+        print(f"\n✅ Exported {len(unique_cpes)} CPE entries to: {csv_file}")
+    except Exception as e:
+        print(f"⚠️  Failed to export CSV: {e}")
 
 # --------- Validate filters against actual CPE data ------------
 def validate_filters(config, days=90):
