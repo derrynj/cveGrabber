@@ -113,6 +113,7 @@ dmypy.json
 
 # Project specific
 config.yaml
+config.suggested.yaml
 seen_cves_cpe.txt
 error_report_state.txt
 cve_alert.log

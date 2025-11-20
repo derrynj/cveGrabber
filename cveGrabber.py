@@ -10,6 +10,7 @@ from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from difflib import get_close_matches
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_FILE = os.path.join(script_dir, "config.yaml")
@@ -188,6 +189,181 @@ def dump_cpes(config, days=1):
     print("\n📋 Unique Vendor:Product:Version tuples in last", days, "days:\n")
     for vendor, product, version in sorted(unique_cpes):
         print(f"{vendor:15} {product:25} {version}")
+
+# --------- Validate filters against actual CPE data ------------
+def validate_filters(config, days=90):
+    """Validate configured filters against actual CPE data and suggest corrections."""
+    print(f"\n🔍 Validating filters against {days} days of CVE data...")
+    data = fetch_recent_cves(days)
+    if not data:
+        print("❌ Failed to fetch CVE data")
+        return
+
+    # Collect all unique vendor/product combinations
+    actual_cpes = defaultdict(set)  # vendor -> set of products
+    actual_versions = defaultdict(set)  # (vendor, product) -> set of versions
+    
+    for item in data.get("vulnerabilities", []):
+        cve = item["cve"]
+        for conf in cve.get("configurations", []):
+            for node in conf.get("nodes", []):
+                for match in node.get("cpeMatch", []):
+                    cpe_uri = match.get("criteria", "").lower()
+                    parts = cpe_uri.split(":")
+                    if len(parts) < 6:
+                        continue
+                    
+                    vendor = parts[3]
+                    product = parts[4]
+                    version = parts[5]
+                    
+                    actual_cpes[vendor].add(product)
+                    actual_versions[(vendor, product)].add(version)
+    
+    print(f"✅ Found {len(actual_cpes)} unique vendors in {days} days of data\n")
+    
+    # Validate configured filters
+    configured_filters = config["filters"]["products"]
+    suggestions = []
+    issues = []
+    
+    for filter_item in configured_filters:
+        vendor = filter_item["vendor"].lower()
+        products = filter_item.get("product", "*")
+        versions = filter_item.get("version", "*")
+        
+        # Normalize to lists
+        if isinstance(products, str):
+            products = [products]
+        if isinstance(versions, str):
+            versions = [versions]
+        
+        # Check if vendor exists
+        if vendor not in actual_cpes:
+            vendor_matches = get_close_matches(vendor, actual_cpes.keys(), n=3, cutoff=0.6)
+            issues.append({
+                "type": "vendor_not_found",
+                "vendor": vendor,
+                "suggestions": vendor_matches,
+                "original": filter_item
+            })
+            print(f"⚠️  Vendor '{vendor}' not found in recent CVEs")
+            if vendor_matches:
+                print(f"   Did you mean: {', '.join(vendor_matches)}")
+            print()
+            continue
+        
+        # Check products
+        available_products = list(actual_cpes[vendor])
+        for product in products:
+            if product == "*":
+                continue
+            
+            # Handle wildcards
+            product_base = product.rstrip("*")
+            if product.endswith("*"):
+                # Check if any actual products start with this base
+                matches = [p for p in available_products if p.startswith(product_base)]
+                if not matches:
+                    fuzzy_matches = get_close_matches(product_base, available_products, n=3, cutoff=0.6)
+                    issues.append({
+                        "type": "product_not_found",
+                        "vendor": vendor,
+                        "product": product,
+                        "suggestions": fuzzy_matches,
+                        "original": filter_item
+                    })
+                    print(f"⚠️  Product pattern '{product}' (vendor: {vendor}) has no matches")
+                    if fuzzy_matches:
+                        print(f"   Similar products: {', '.join(fuzzy_matches)}")
+                    print(f"   Available products for {vendor}: {', '.join(sorted(available_products)[:5])}...")
+                    print()
+            else:
+                # Exact match
+                if product not in available_products:
+                    fuzzy_matches = get_close_matches(product, available_products, n=3, cutoff=0.6)
+                    issues.append({
+                        "type": "product_not_found",
+                        "vendor": vendor,
+                        "product": product,
+                        "suggestions": fuzzy_matches,
+                        "original": filter_item
+                    })
+                    print(f"⚠️  Product '{product}' not found for vendor '{vendor}'")
+                    if fuzzy_matches:
+                        print(f"   Did you mean: {', '.join(fuzzy_matches)}")
+                    print(f"   Available products: {', '.join(sorted(available_products)[:10])}")
+                    print()
+    
+    # Generate corrected config
+    if issues:
+        print("\n" + "="*70)
+        print("📝 Generating corrected config based on suggestions...")
+        print("="*70 + "\n")
+        
+        corrected_filters = []
+        for filter_item in configured_filters:
+            vendor = filter_item["vendor"].lower()
+            
+            # Find if this filter has issues
+            filter_issues = [i for i in issues if i["original"] == filter_item]
+            
+            if not filter_issues:
+                # No issues, keep as is
+                corrected_filters.append(filter_item)
+                continue
+            
+            # Check for vendor issues first
+            vendor_issue = next((i for i in filter_issues if i["type"] == "vendor_not_found"), None)
+            if vendor_issue and vendor_issue["suggestions"]:
+                # Use best vendor match
+                new_vendor = vendor_issue["suggestions"][0]
+                new_filter = filter_item.copy()
+                new_filter["vendor"] = new_vendor
+                corrected_filters.append(new_filter)
+                print(f"✏️  Changed vendor '{vendor}' → '{new_vendor}'")
+                continue
+            
+            # Check for product issues
+            product_issues = [i for i in filter_issues if i["type"] == "product_not_found"]
+            if product_issues:
+                new_filter = filter_item.copy()
+                products = new_filter.get("product", "*")
+                if isinstance(products, str):
+                    products = [products]
+                
+                new_products = []
+                for prod in products:
+                    issue = next((i for i in product_issues if i["product"] == prod), None)
+                    if issue and issue["suggestions"]:
+                        new_prod = issue["suggestions"][0]
+                        new_products.append(new_prod)
+                        print(f"✏️  Changed product '{prod}' → '{new_prod}' (vendor: {vendor})")
+                    else:
+                        new_products.append(prod)
+                
+                if len(new_products) == 1:
+                    new_filter["product"] = new_products[0]
+                else:
+                    new_filter["product"] = new_products
+                corrected_filters.append(new_filter)
+            else:
+                corrected_filters.append(filter_item)
+        
+        # Write corrected config
+        output_file = os.path.join(script_dir, "config.suggested.yaml")
+        corrected_config = config.copy()
+        corrected_config["filters"]["products"] = corrected_filters
+        
+        with open(output_file, "w") as f:
+            yaml.dump(corrected_config, f, default_flow_style=False, sort_keys=False)
+        
+        print(f"\n✅ Corrected configuration written to: {output_file}")
+        print(f"   Review the changes and rename to config.yaml if acceptable")
+    else:
+        print("✅ All filters look good! No issues found.")
+    
+    print(f"\n💡 Tip: Run with --dump-cpes --days {days} to see all available vendor:product combinations")
 
 # ---------------- CVE Handling ----------------
 def fetch_recent_cves(days=1):
@@ -388,14 +564,14 @@ def parse_and_alert(config, days=1, digest_mode=False):
             sections += "<h2>New CVEs</h2>"
             for vendor, entries in new_entries.items():
                 sections += f"<h3>{vendor}</h3>"
-                for _, html in sorted(entries, key=lambda x: x[0], reverse=True):
+                for html in entries:
                     sections += html
 
         if updated_entries:
             sections += "<h2>Updated CVEs</h2>"
             for vendor, entries in updated_entries.items():
                 sections += f"<h3>{vendor}</h3>"
-                for _, html in sorted(entries, key=lambda x: x[0], reverse=True):
+                for html in entries:
                     sections += html
 
         html_body = f"""
@@ -436,6 +612,7 @@ def main():
     parser.add_argument("--digest", action="store_true", help="Run in digest mode (daily summary)")
     parser.add_argument("--realtime", action="store_true", help="Run in realtime alert mode (per CVE)")
     parser.add_argument("--dump-cpes", action="store_true", help="Dump vendor:product:version combinations")
+    parser.add_argument("--validate-filters", action="store_true", help="Validate configured filters against actual CPE data")
     parser.add_argument("--days", type=int, default=1, help="How many past days of CVEs to query (default=1)")
     args = parser.parse_args()
 
@@ -443,14 +620,16 @@ def main():
     setup_logging(config)
 
     try:
-        if args.dump_cpes:
+        if args.validate_filters:
+            validate_filters(config, days=args.days if args.days > 1 else 90)
+        elif args.dump_cpes:
             dump_cpes(config, days=args.days)
         elif args.digest:
             parse_and_alert(config, days=args.days, digest_mode=True)
         elif args.realtime:
             parse_and_alert(config, days=args.days, digest_mode=False)
         else:
-            logging.warning("No mode selected. Use --digest, --realtime, or --dump-cpes.")
+            logging.warning("No mode selected. Use --digest, --realtime, --dump-cpes, or --validate-filters.")
     except Exception as e:
         msg = f"Fatal error in main(): {e}"
         logging.critical(msg, exc_info=True)
