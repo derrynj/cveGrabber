@@ -439,6 +439,7 @@ def fetch_recent_cves(days=1):
 
 def cve_matches_products(cve, products):
     try:
+        # Priority 1: Check CPE Configurations (Exact Match)
         configs = cve.get("configurations", [])
         for conf in configs:
             for node in conf.get("nodes", []):
@@ -472,6 +473,53 @@ def cve_matches_products(cve, products):
                                     for v in vers:
                                         if v == "*" or (v.endswith("*") and cpe_version.startswith(v[:-1])) or (cpe_version == v) or (cpe_version in ["-", ""] and v == "*"):
                                             return vendor
+
+        # Priority 2: Fallback to Description Search (Fuzzy Match)
+        # Useful for new CVEs where NVD hasn't added CPEs yet
+        descriptions = cve.get("descriptions", [])
+        if not descriptions:
+            return None
+            
+        desc_text = descriptions[0].get("value", "").lower()
+        
+        for p in products:
+            vendor = p["vendor"].lower()
+            prods = p["product"]
+            
+            if isinstance(prods, str):
+                prods = [prods]
+            prods = [x.lower() for x in prods]
+            
+            # Check if vendor is in description
+            vendor_found = vendor in desc_text
+            
+            for prod in prods:
+                # If product is "*", checking vendor is enough
+                if prod == "*":
+                    if vendor_found:
+                        return vendor
+                    continue
+                    
+                # Strip wildcard for text search
+                clean_prod = prod.replace("_", " ").rstrip("*")
+                
+                # Skip very short product names for safety if vendor matches
+                if len(clean_prod) < 3:
+                    continue
+                    
+                # Check if product is in description
+                prod_found = clean_prod in desc_text or prod.rstrip("*") in desc_text
+                
+                if vendor_found and prod_found:
+                    logging.debug(f"Found fuzzy match (Vendor+Product) in description for {vendor} {prod}")
+                    return vendor
+                
+                # Relaxed check: If product is distinctive (>= 6 chars), match even if vendor is missing
+                # e.g. "SonicOS" implies SonicWall, "Android" implies Google/Samsung
+                if not vendor_found and prod_found and len(clean_prod) >= 5:
+                    logging.debug(f"Found fuzzy match (Product only) in description for {vendor} {prod}")
+                    return vendor
+
     except Exception as e:
         msg = f"Error parsing CVE {cve.get('id','unknown')}: {e}"
         logging.error(msg, exc_info=True)
