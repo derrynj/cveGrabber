@@ -4,6 +4,7 @@ import yaml
 import argparse
 import logging
 import os
+import re
 from logging.handlers import TimedRotatingFileHandler, RotatingFileHandler
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -14,7 +15,8 @@ from difflib import get_close_matches
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_FILE = os.path.join(script_dir, "config.yaml")
-STATE_FILE = Path(os.path.join(script_dir, "seen_cves_cpe.txt"))
+STATE_FILE_DIGEST = Path(os.path.join(script_dir, "seen_cves_digest.txt"))
+STATE_FILE_REALTIME = Path(os.path.join(script_dir, "seen_cves_realtime.txt"))
 ERROR_STATE_FILE = Path(os.path.join(script_dir, "error_report_state.txt"))
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
@@ -71,17 +73,17 @@ def load_config():
     with open(CONFIG_FILE, "r") as f:
         return yaml.safe_load(f)
 
-def load_seen():
+def load_seen(state_file):
     seen = {}
-    if STATE_FILE.exists():
-        for line in STATE_FILE.read_text().splitlines():
+    if state_file.exists():
+        for line in state_file.read_text().splitlines():
             if "|" in line:
                 cid, mod = line.strip().split("|", 1)
                 seen[cid] = mod
     return seen
 
-def save_seen(seen):
-    with STATE_FILE.open("w") as f:
+def save_seen(seen, state_file):
+    with state_file.open("w") as f:
         for cid, mod in seen.items():
             f.write(f"{cid}|{mod}\n")
 
@@ -490,8 +492,9 @@ def cve_matches_products(cve, products):
                 prods = [prods]
             prods = [x.lower() for x in prods]
             
-            # Check if vendor is in description
-            vendor_found = vendor in desc_text
+            # Check if vendor is in description (as whole word)
+            vendor_pattern = r'\b' + re.escape(vendor) + r'\b'
+            vendor_found = bool(re.search(vendor_pattern, desc_text, re.IGNORECASE))
             
             for prod in prods:
                 # If product is "*", checking vendor is enough
@@ -503,12 +506,16 @@ def cve_matches_products(cve, products):
                 # Strip wildcard for text search
                 clean_prod = prod.replace("_", " ").rstrip("*")
                 
-                # Skip very short product names for safety if vendor matches
+                # Skip very short product names for safety
                 if len(clean_prod) < 3:
                     continue
-                    
-                # Check if product is in description
-                prod_found = clean_prod in desc_text or prod.rstrip("*") in desc_text
+                
+                # Use word boundary matching to avoid "office" matching "Woffice"
+                # Try both underscore version and space version
+                prod_pattern = r'\b' + re.escape(clean_prod) + r'\b'
+                prod_pattern_underscore = r'\b' + re.escape(prod.rstrip("*")) + r'\b'
+                prod_found = bool(re.search(prod_pattern, desc_text, re.IGNORECASE)) or \
+                             bool(re.search(prod_pattern_underscore, desc_text, re.IGNORECASE))
                 
                 if vendor_found and prod_found:
                     logging.debug(f"Found fuzzy match (Vendor+Product) in description for {vendor} {prod}")
@@ -516,7 +523,7 @@ def cve_matches_products(cve, products):
                 
                 # Relaxed check: If product is distinctive (>= 6 chars), match even if vendor is missing
                 # e.g. "SonicOS" implies SonicWall, "Android" implies Google/Samsung
-                if not vendor_found and prod_found and len(clean_prod) >= 5:
+                if not vendor_found and prod_found and len(clean_prod) >= 6:
                     logging.debug(f"Found fuzzy match (Product only) in description for {vendor} {prod}")
                     return vendor
 
@@ -542,13 +549,16 @@ def severity_badge(cvss):
 
 
 def parse_and_alert(config, days=1, digest_mode=False):
-    seen = load_seen()
+    # Use separate state files for digest vs realtime
+    state_file = STATE_FILE_DIGEST if digest_mode else STATE_FILE_REALTIME
+    seen = load_seen(state_file)
     data = fetch_recent_cves(days)
     if not data:
         return
 
     new_entries = defaultdict(list)
     updated_entries = defaultdict(list)
+    realtime_alerts = []  # For realtime mode: list of (cve_id, vendor, badge, description, references, published, modified, status)
 
     metrics["cves_found"] = 0
     metrics["cves_sent"] = 0
@@ -609,14 +619,29 @@ def parse_and_alert(config, days=1, digest_mode=False):
         </div>
         """
 
-        if status == "new":
-            new_entries[vendor.title()].append(entry_html)
+        if digest_mode:
+            if status == "new":
+                new_entries[vendor.title()].append(entry_html)
+            else:
+                updated_entries[vendor.title()].append(entry_html)
         else:
-            updated_entries[vendor.title()].append(entry_html)
+            # Realtime mode: collect for individual alerts
+            realtime_alerts.append({
+                "cve_id": cve_id,
+                "vendor": vendor.title(),
+                "badge": badge,
+                "description": description,
+                "references": references,
+                "published": published,
+                "modified": modified,
+                "status": status,
+                "cvss_score": cvss_score,
+                "entry_html": entry_html
+            })
 
-    save_seen(seen)
+    save_seen(seen, state_file)
 
-    # Only digest mode groups/HTML sends
+    # Digest mode: send one batched email
     if digest_mode and (new_entries or updated_entries):
         today = datetime.now().strftime("%Y-%m-%d")
         total = sum(len(v) for v in new_entries.values()) + sum(len(v) for v in updated_entries.values())
@@ -670,6 +695,42 @@ def parse_and_alert(config, days=1, digest_mode=False):
 
         send_email(subject, html_body, config["email"]["digest_recipients"], config)
         logging.info(f"Digest sent with {total} items ({sum(len(v) for v in new_entries.values())} new, {sum(len(v) for v in updated_entries.values())} updated)")
+
+    # Realtime mode: send individual emails per CVE
+    if not digest_mode and realtime_alerts:
+        for alert in realtime_alerts:
+            status_label = "🆕 NEW" if alert["status"] == "new" else "🔄 UPDATED"
+            subject = f"[CVE Alert] {status_label} {alert['cve_id']} ({alert['vendor']}) - CVSS {alert['cvss_score']}"
+            
+            html_body = f"""
+            <html>
+            <head>
+              <style>
+                body {{ font-family: Arial, sans-serif; line-height:1.5; color:#333; }}
+                .cve-entry {{ border:1px solid #ddd; margin:10px 0; padding:15px;
+                              border-radius:6px; background:#fafafa; }}
+                .cve-entry.updated {{ border-left:4px solid #2196f3; background:#f5faff; }}
+                .cve-header {{ font-weight:bold; font-size:16px; color:#1a237e; margin-bottom:10px; }}
+                .badge {{ padding:2px 6px; border-radius:4px; font-weight:bold; font-size:12px; }}
+                .critical {{ background:#d32f2f; color:white; }}
+                .high {{ background:#f57c00; color:white; }}
+                .medium {{ background:#fbc02d; color:black; }}
+                .low {{ background:#388e3c; color:white; }}
+                .na {{ background:#9e9e9e; color:white; }}
+                ul {{ margin:5px 0 5px 15px; }}
+              </style>
+            </head>
+            <body>
+              <h1>⚠️ CVE Alert: {alert['cve_id']}</h1>
+              {alert['entry_html']}
+            </body>
+            </html>
+            """
+            
+            send_email(subject, html_body, config["email"]["realtime_recipients"], config)
+            metrics["cves_sent"] += 1
+        
+        logging.info(f"Realtime: Sent {len(realtime_alerts)} individual CVE alerts to {config['email']['realtime_recipients']}")
 
 # ---------------- Main ----------------
 def main():
