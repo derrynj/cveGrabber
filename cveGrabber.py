@@ -477,7 +477,8 @@ def cve_matches_products(cve, products):
                                             return vendor
 
         # Priority 2: Fallback to Description Search (Fuzzy Match)
-        # Useful for new CVEs where NVD hasn't added CPEs yet
+        # Only applies to filters with fuzzy_match: true
+        # Requires BOTH vendor AND product to be present in description (strict mode)
         descriptions = cve.get("descriptions", [])
         if not descriptions:
             return None
@@ -485,6 +486,10 @@ def cve_matches_products(cve, products):
         desc_text = descriptions[0].get("value", "").lower()
         
         for p in products:
+            # Skip fuzzy matching if not enabled for this filter
+            if not p.get("fuzzy_match", False):
+                continue
+                
             vendor = p["vendor"].lower()
             prods = p["product"]
             
@@ -496,12 +501,15 @@ def cve_matches_products(cve, products):
             vendor_pattern = r'\b' + re.escape(vendor) + r'\b'
             vendor_found = bool(re.search(vendor_pattern, desc_text, re.IGNORECASE))
             
+            # Strict mode: vendor MUST be found for fuzzy matching
+            if not vendor_found:
+                continue
+            
             for prod in prods:
                 # If product is "*", checking vendor is enough
                 if prod == "*":
-                    if vendor_found:
-                        return vendor
-                    continue
+                    logging.debug(f"Found fuzzy match (Vendor only) in description for {vendor}")
+                    return vendor
                     
                 # Strip wildcard for text search
                 clean_prod = prod.replace("_", " ").rstrip("*")
@@ -517,14 +525,9 @@ def cve_matches_products(cve, products):
                 prod_found = bool(re.search(prod_pattern, desc_text, re.IGNORECASE)) or \
                              bool(re.search(prod_pattern_underscore, desc_text, re.IGNORECASE))
                 
-                if vendor_found and prod_found:
+                # Strict mode: require BOTH vendor AND product
+                if prod_found:
                     logging.debug(f"Found fuzzy match (Vendor+Product) in description for {vendor} {prod}")
-                    return vendor
-                
-                # Relaxed check: If product is distinctive (>= 6 chars), match even if vendor is missing
-                # e.g. "SonicOS" implies SonicWall, "Android" implies Google/Samsung
-                if not vendor_found and prod_found and len(clean_prod) >= 6:
-                    logging.debug(f"Found fuzzy match (Product only) in description for {vendor} {prod}")
                     return vendor
 
     except Exception as e:
