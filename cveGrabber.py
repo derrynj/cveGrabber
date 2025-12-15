@@ -444,7 +444,21 @@ def cve_matches_products(cve, products):
         # Priority 1: Check CPE Configurations (Exact Match)
         configs = cve.get("configurations", [])
         for conf in configs:
-            for node in conf.get("nodes", []):
+            nodes = conf.get("nodes", [])
+            conf_operator = conf.get("operator", "OR")
+            
+            # If this is an AND configuration with multiple nodes, it likely means
+            # "App X running on Platform Y". We only want to match the primary (first) node,
+            # not the platform nodes. This prevents Chrome-on-Windows from matching Windows filters.
+            is_platform_config = conf_operator == "AND" and len(nodes) > 1
+            
+            for node_index, node in enumerate(nodes):
+                # In AND configs, skip non-primary nodes (platforms like Windows, Linux)
+                # Primary node is usually index 0 (the actual vulnerable software)
+                if is_platform_config and node_index > 0:
+                    logging.debug(f"Skipping platform node {node_index} in AND configuration for {cve.get('id')}")
+                    continue
+                    
                 for match in node.get("cpeMatch", []):
                     cpe_uri = match.get("criteria", "").lower()
                     parts = cpe_uri.split(":")
@@ -474,6 +488,7 @@ def cve_matches_products(cve, products):
                                 if prod == "*" or (prod.endswith("*") and cpe_product.startswith(prod[:-1])) or (cpe_product == prod):
                                     for v in vers:
                                         if v == "*" or (v.endswith("*") and cpe_version.startswith(v[:-1])) or (cpe_version == v) or (cpe_version in ["-", ""] and v == "*"):
+                                            logging.debug(f"CPE match: {cve.get('id')} matched filter vendor={vendor} product={prod} via CPE {cpe_uri}")
                                             return vendor
 
         # Priority 2: Fallback to Description Search (Fuzzy Match)
@@ -553,19 +568,31 @@ def severity_badge(cvss):
 
 def parse_and_alert(config, days=1, digest_mode=False):
     # Use separate state files for digest vs realtime
+    mode_name = "DIGEST" if digest_mode else "REALTIME"
     state_file = STATE_FILE_DIGEST if digest_mode else STATE_FILE_REALTIME
+    logging.debug(f"[{mode_name}] Starting parse_and_alert for {days} day(s)")
+    logging.debug(f"[{mode_name}] Using state file: {state_file}")
+    
     seen = load_seen(state_file)
+    logging.debug(f"[{mode_name}] Loaded {len(seen)} previously seen CVEs from state file")
+    
     data = fetch_recent_cves(days)
     if not data:
+        logging.warning(f"[{mode_name}] No CVE data returned from API, exiting")
         return
 
     new_entries = defaultdict(list)
     updated_entries = defaultdict(list)
-    realtime_alerts = []  # For realtime mode: list of (cve_id, vendor, badge, description, references, published, modified, status)
+    realtime_alerts = []  # For realtime mode
 
     metrics["cves_found"] = 0
     metrics["cves_sent"] = 0
     metrics["cves_skipped"] = 0
+    
+    matched_count = 0
+    no_match_count = 0
+    cvss_skip_count = 0
+    already_seen_count = 0
 
     for item in data.get("vulnerabilities", []):
         cve = item["cve"]
@@ -587,62 +614,151 @@ def parse_and_alert(config, days=1, digest_mode=False):
 
         vendor = cve_matches_products(cve, config["filters"]["products"])
         if not vendor:
+            no_match_count += 1
             continue
 
         min_cvss = config["filters"].get("min_cvss", 0)
         if cvss_score is None or cvss_score < min_cvss:
+            logging.debug(f"[{mode_name}] {cve_id} matched {vendor} but CVSS {cvss_score} < min_cvss {min_cvss}, skipping")
             metrics["cves_skipped"] += 1
+            cvss_skip_count += 1
             continue
 
         # Determine status (new vs updated)
         if cve_id not in seen:
             status = "new"
             seen[cve_id] = modified
+            logging.debug(f"[{mode_name}] {cve_id} is NEW (vendor={vendor}, CVSS={cvss_score})")
         else:
             if modified > seen[cve_id]:
                 status = "updated"
                 seen[cve_id] = modified
+                logging.debug(f"[{mode_name}] {cve_id} is UPDATED (vendor={vendor}, CVSS={cvss_score})")
             else:
+                already_seen_count += 1
                 continue
+        
+        matched_count += 1
 
-        badge = severity_badge(cvss_score)
-        references = "".join(
-            f'<li><a href="{ref.get("url","")}">{ref.get("url","")}</a></li>'
-            for ref in cve.get("references", []) if "url" in ref
-        )
-        entry_html = f"""
-        <div class="cve-entry {'updated' if status=='updated' else ''}">
-          <div class="cve-header">{cve_id} {badge}</div>
-          <p><b>Vendor:</b> {vendor.title()}<br>
-             <b>Published:</b> {published}<br>
-             <b>Last Modified:</b> {modified}</p>
-          <p>{description}</p>
-          <b>References:</b>
-          <ul>{references}</ul>
-        </div>
-        """
+        references = [ref.get("url", "") for ref in cve.get("references", []) if "url" in ref]
+        
+        # Store CVE data for later deduplication
+        cve_data = {
+            "cve_id": cve_id,
+            "vendor": vendor.title(),
+            "cvss_score": cvss_score,
+            "description": description,
+            "references": references,
+            "published": published,
+            "modified": modified,
+            "status": status
+        }
 
         if digest_mode:
             if status == "new":
-                new_entries[vendor.title()].append(entry_html)
+                new_entries[vendor.title()].append(cve_data)
             else:
-                updated_entries[vendor.title()].append(entry_html)
+                updated_entries[vendor.title()].append(cve_data)
         else:
-            # Realtime mode: collect for individual alerts
-            realtime_alerts.append({
-                "cve_id": cve_id,
-                "vendor": vendor.title(),
-                "badge": badge,
-                "description": description,
-                "references": references,
-                "published": published,
-                "modified": modified,
-                "status": status,
-                "cvss_score": cvss_score,
-                "entry_html": entry_html
-            })
+            realtime_alerts.append(cve_data)
 
     save_seen(seen, state_file)
+    
+    # Deduplicate CVEs with identical titles (first sentence of description)
+    def extract_title(description):
+        """Extract the title (first sentence) from a CVE description."""
+        # Split on common sentence endings
+        for sep in ['. ', '.\n', '.\t']:
+            if sep in description:
+                return description.split(sep)[0].strip()
+        return description.strip()
+    
+    def deduplicate_cves(cve_list):
+        """Group CVEs with identical titles and merge them."""
+        if not cve_list:
+            return []
+        
+        # Group by title (first sentence)
+        title_groups = defaultdict(list)
+        for cve_data in cve_list:
+            title = extract_title(cve_data["description"])
+            title_groups[title].append(cve_data)
+        
+        # Merge groups
+        deduplicated = []
+        for title, group in title_groups.items():
+            if len(group) == 1:
+                deduplicated.append(group[0])
+            else:
+                # Merge multiple CVEs with same description
+                merged = group[0].copy()
+                all_cve_ids = [c["cve_id"] for c in group]
+                all_refs = []
+                for c in group:
+                    all_refs.extend(c["references"])
+                all_refs = list(set(all_refs))  # Deduplicate references
+                
+                # Use highest CVSS score
+                max_cvss = max(c["cvss_score"] for c in group if c["cvss_score"] is not None)
+                
+                merged["cve_id"] = ", ".join(all_cve_ids)
+                merged["cve_count"] = len(group)
+                merged["cvss_score"] = max_cvss
+                merged["references"] = all_refs
+                
+                logging.debug(f"[{mode_name}] Merged {len(group)} CVEs with identical description: {all_cve_ids}")
+                deduplicated.append(merged)
+        
+        return deduplicated
+    
+    # Apply deduplication to digest entries
+    for vendor_name in new_entries:
+        original_count = len(new_entries[vendor_name])
+        new_entries[vendor_name] = deduplicate_cves(new_entries[vendor_name])
+        if len(new_entries[vendor_name]) < original_count:
+            logging.info(f"[{mode_name}] Deduplicated {vendor_name} new entries: {original_count} → {len(new_entries[vendor_name])}")
+    
+    for vendor_name in updated_entries:
+        original_count = len(updated_entries[vendor_name])
+        updated_entries[vendor_name] = deduplicate_cves(updated_entries[vendor_name])
+        if len(updated_entries[vendor_name]) < original_count:
+            logging.info(f"[{mode_name}] Deduplicated {vendor_name} updated entries: {original_count} → {len(updated_entries[vendor_name])}")
+    
+    # Helper to generate HTML for a CVE entry
+    def generate_entry_html(cve_data):
+        badge = severity_badge(cve_data["cvss_score"])
+        refs_html = "".join(f'<li><a href="{ref}">{ref}</a></li>' for ref in cve_data["references"])
+        
+        # Generate CVE links - handle both single and merged CVEs
+        cve_ids = cve_data["cve_id"].split(", ")
+        cve_links = ", ".join(
+            f'<a href="https://nvd.nist.gov/vuln/detail/{cve_id}" style="color:#1a237e;">{cve_id}</a>'
+            for cve_id in cve_ids
+        )
+        
+        cve_count = cve_data.get("cve_count", 1)
+        if cve_count > 1:
+            header = f"{cve_links} {badge} <span style='color:#666;'>({cve_count} related CVEs)</span>"
+        else:
+            header = f"{cve_links} {badge}"
+        
+        return f"""
+        <div class="cve-entry {'updated' if cve_data['status']=='updated' else ''}">
+          <div class="cve-header">{header}</div>
+          <p><b>Vendor:</b> {cve_data['vendor']}<br>
+             <b>Published:</b> {cve_data['published']}<br>
+             <b>Last Modified:</b> {cve_data['modified']}</p>
+          <p>{cve_data['description']}</p>
+          <b>References:</b>
+          <ul>{refs_html}</ul>
+        </div>
+        """
+    
+    # Log summary of processing
+    total_new = sum(len(v) for v in new_entries.values())
+    total_updated = sum(len(v) for v in updated_entries.values())
+    logging.info(f"[{mode_name}] Processing complete: {metrics['cves_found']} CVEs fetched, {matched_count} matched filters, {cvss_skip_count} skipped (CVSS), {already_seen_count} already seen, {no_match_count} no match")
+    logging.info(f"[{mode_name}] After deduplication: {total_new} new, {total_updated} updated entries")
 
     # Digest mode: send one batched email
     if digest_mode and (new_entries or updated_entries):
@@ -658,15 +774,15 @@ def parse_and_alert(config, days=1, digest_mode=False):
             sections += "<h2>New CVEs</h2>"
             for vendor, entries in new_entries.items():
                 sections += f"<h3>{vendor}</h3>"
-                for html in entries:
-                    sections += html
+                for cve_data in entries:
+                    sections += generate_entry_html(cve_data)
 
         if updated_entries:
             sections += "<h2>Updated CVEs</h2>"
             for vendor, entries in updated_entries.items():
                 sections += f"<h3>{vendor}</h3>"
-                for html in entries:
-                    sections += html
+                for cve_data in entries:
+                    sections += generate_entry_html(cve_data)
 
         html_body = f"""
         <html>
@@ -696,8 +812,11 @@ def parse_and_alert(config, days=1, digest_mode=False):
         </html>
         """
 
+        logging.debug(f"[{mode_name}] Preparing to send digest email with {total} CVEs to {config['email']['digest_recipients']}")
         send_email(subject, html_body, config["email"]["digest_recipients"], config)
-        logging.info(f"Digest sent with {total} items ({sum(len(v) for v in new_entries.values())} new, {sum(len(v) for v in updated_entries.values())} updated)")
+        logging.info(f"[{mode_name}] Digest sent with {total} items ({sum(len(v) for v in new_entries.values())} new, {sum(len(v) for v in updated_entries.values())} updated)")
+    elif digest_mode:
+        logging.info(f"[{mode_name}] No new/updated CVEs to send - no digest email generated")
 
     # Realtime mode: send individual emails per CVE
     if not digest_mode and realtime_alerts:
@@ -730,10 +849,13 @@ def parse_and_alert(config, days=1, digest_mode=False):
             </html>
             """
             
+            logging.debug(f"[{mode_name}] Sending realtime alert for {alert['cve_id']} to {config['email']['realtime_recipients']}")
             send_email(subject, html_body, config["email"]["realtime_recipients"], config)
             metrics["cves_sent"] += 1
         
-        logging.info(f"Realtime: Sent {len(realtime_alerts)} individual CVE alerts to {config['email']['realtime_recipients']}")
+        logging.info(f"[{mode_name}] Sent {len(realtime_alerts)} individual CVE alerts to {config['email']['realtime_recipients']}")
+    elif not digest_mode:
+        logging.info(f"[{mode_name}] No new/updated CVEs to send - no realtime alerts generated")
 
 # ---------------- Main ----------------
 def main():
