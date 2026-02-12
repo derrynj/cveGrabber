@@ -566,7 +566,7 @@ def severity_badge(cvss):
     return '<span class="badge na">N/A</span>'
 
 
-def parse_and_alert(config, days=1, digest_mode=False, explain=False):
+def parse_and_alert(config, days=1, digest_mode=False, explain=False, dry_run=False):
     # Use separate state files for digest vs realtime
     mode_name = "DIGEST" if digest_mode else "REALTIME"
     state_file = STATE_FILE_DIGEST if digest_mode else STATE_FILE_REALTIME
@@ -681,7 +681,10 @@ def parse_and_alert(config, days=1, digest_mode=False, explain=False):
         else:
             realtime_alerts.append(cve_data)
 
-    save_seen(seen, state_file)
+    if not dry_run:
+        save_seen(seen, state_file)
+    else:
+        logging.info(f"[DRY RUN] Not saving state file changes")
     
     # Deduplicate CVEs with identical titles (first sentence of description)
     def extract_title(description):
@@ -831,9 +834,14 @@ def parse_and_alert(config, days=1, digest_mode=False, explain=False):
         </html>
         """
 
-        logging.debug(f"[{mode_name}] Preparing to send digest email with {total} CVEs to {config['email']['digest_recipients']}")
-        send_email(subject, html_body, config["email"]["digest_recipients"], config)
-        logging.info(f"[{mode_name}] Digest sent with {total} items ({sum(len(v) for v in new_entries.values())} new, {sum(len(v) for v in updated_entries.values())} updated)")
+        if dry_run:
+            logging.info(f"[DRY RUN] Would send digest email with {total} CVEs to {config['email']['digest_recipients']}")
+            logging.debug(f"[DRY RUN] Email subject: {subject}")
+            logging.debug(f"[DRY RUN] Email body snippet: {html_body[:200]}...")
+        else:
+            logging.debug(f"[{mode_name}] Preparing to send digest email with {total} CVEs to {config['email']['digest_recipients']}")
+            send_email(subject, html_body, config["email"]["digest_recipients"], config)
+            logging.info(f"[{mode_name}] Digest sent with {total} items ({sum(len(v) for v in new_entries.values())} new, {sum(len(v) for v in updated_entries.values())} updated)")
     elif digest_mode:
         logging.info(f"[{mode_name}] No new/updated CVEs to send - no digest email generated")
 
@@ -874,19 +882,22 @@ def parse_and_alert(config, days=1, digest_mode=False, explain=False):
             </html>
             """
 
-            logging.debug(
-                f"[{mode_name}] Sending realtime alert for "
-                f"{alert['cve_id']} to {config['email']['realtime_recipients']}"
-            )
-
-            send_email(
-                subject,
-                html_body,
-                config["email"]["realtime_recipients"],
-                config,
-            )
-
-            metrics["cves_sent"] += 1
+            if dry_run:
+                logging.info(f"[DRY RUN] Would send realtime alert for {alert['cve_id']} to {config['email']['realtime_recipients']}")
+                logging.debug(f"[DRY RUN] Email subject: {subject}")
+                logging.debug(f"[DRY RUN] Email body snippet: {html_body[:200]}...")
+            else:
+                logging.debug(
+                    f"[{mode_name}] Sending realtime alert for "
+                    f"{alert['cve_id']} to {config['email']['realtime_recipients']}"
+                )
+                send_email(
+                    subject,
+                    html_body,
+                    config["email"]["realtime_recipients"],
+                    config,
+                )
+                metrics["cves_sent"] += 1
 
         logging.info(
             f"[{mode_name}] Sent {len(realtime_alerts)} "
@@ -915,6 +926,8 @@ def main():
                         help="How many past days of CVEs to query (default=1)")
     parser.add_argument("--explain", action="store_true",
                         help="Explain why CVEs were filtered out (diagnostic mode)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Dry run mode: process CVEs but don't send emails or update state files")
     args = parser.parse_args()
 
     config = load_config()
@@ -930,12 +943,14 @@ def main():
             parse_and_alert(config,
                             days=args.days,
                             digest_mode=True,
-                            explain=args.explain)
+                            explain=args.explain,
+                            dry_run=args.dry_run)
         elif args.realtime:
             parse_and_alert(config,
                             days=args.days,
                             digest_mode=False,
-                            explain=args.explain)
+                            explain=args.explain,
+                            dry_run=args.dry_run)
         else:
             logging.warning(
                 "No mode selected. Use --digest, --realtime, "
@@ -947,8 +962,10 @@ def main():
         log_warnings.append(msg)
     finally:
         try:
-            if log_warnings:
+            if log_warnings and not args.dry_run:
                 send_error_report(config)
+            elif log_warnings and args.dry_run:
+                logging.info("[DRY RUN] Not sending error report email")
         except Exception as e:
             logging.error(
                 "Failed sending error report: {}".format(e),

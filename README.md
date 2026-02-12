@@ -9,10 +9,12 @@ A Python script to monitor and alert on new and updated Common Vulnerabilities a
 - **Email Alerts**: Send HTML-formatted email alerts with severity badges and detailed information
 - **Digest Mode**: Daily summary emails grouping new and updated CVEs by vendor
 - **Realtime Mode**: Immediate alerts for individual CVEs (per CVE basis)
+- **Dry Run Mode**: Test configuration without sending emails or modifying state files
 - **State Tracking**: Tracks seen CVEs to avoid duplicate notifications
 - **Comprehensive Logging**: Configurable logging with file rotation (daily or size-based)
 - **Error Reporting**: Automatic error reporting via email with run metrics
 - **CPE Dumping**: Utility to dump unique vendor:product:version combinations for testing
+- **Filter Validation**: Validate configured filters against actual CPE data with suggestions
 
 ## Installation
 
@@ -70,7 +72,10 @@ python cveGrabber.py --dump-cpes
 - `--digest`: Run in digest mode (daily summary email)
 - `--realtime`: Run in realtime alert mode (per CVE)
 - `--dump-cpes`: Dump vendor:product:version combinations
+- `--validate-filters`: Validate configured filters against actual CPE data
 - `--days`: Number of past days to query (default: 1)
+- `--explain`: Explain why CVEs were filtered out (diagnostic mode)
+- `--dry-run`: Dry run mode - process CVEs but don't send emails or update state files
 
 ### Examples
 
@@ -89,6 +94,16 @@ Dump CPE data for analysis:
 python cveGrabber.py --dump-cpes --days 30
 ```
 
+Test configuration without sending emails (dry run):
+```bash
+python cveGrabber.py --digest --days 1 --dry-run
+```
+
+Diagnose why CVEs are being filtered out:
+```bash
+python cveGrabber.py --digest --days 1 --explain --dry-run
+```
+
 ## Email Format
 
 The script sends HTML-formatted emails with:
@@ -103,7 +118,8 @@ The script sends HTML-formatted emails with:
 
 The script maintains state to avoid duplicate notifications:
 
-- `seen_cves_cpe.txt`: Tracks seen CVEs with their last modified date
+- `seen_cves_digest.txt`: Tracks seen CVEs for digest mode with their last modified date
+- `seen_cves_realtime.txt`: Tracks seen CVEs for realtime mode with their last modified date
 - `error_report_state.txt`: Tracks when error reports were last sent
 
 ## Dependencies
