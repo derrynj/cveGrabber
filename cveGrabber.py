@@ -566,7 +566,7 @@ def severity_badge(cvss):
     return '<span class="badge na">N/A</span>'
 
 
-def parse_and_alert(config, days=1, digest_mode=False):
+def parse_and_alert(config, days=1, digest_mode=False, explain=False):
     # Use separate state files for digest vs realtime
     mode_name = "DIGEST" if digest_mode else "REALTIME"
     state_file = STATE_FILE_DIGEST if digest_mode else STATE_FILE_REALTIME
@@ -612,16 +612,35 @@ def parse_and_alert(config, days=1, digest_mode=False):
 
         metrics["cves_found"] += 1
 
-        vendor = cve_matches_products(cve, config["filters"]["products"])
+        vendor = cve_matches_products(
+            cve,
+            config["filters"]["products"]
+        )
+
         if not vendor:
             no_match_count += 1
+            if explain:
+                logging.info(
+                    "[EXPLAIN] {} skipped: no vendor/product match"
+                    .format(cve_id)
+                )
             continue
 
         min_cvss = config["filters"].get("min_cvss", 0)
         if cvss_score is None or cvss_score < min_cvss:
-            logging.debug(f"[{mode_name}] {cve_id} matched {vendor} but CVSS {cvss_score} < min_cvss {min_cvss}, skipping")
             metrics["cves_skipped"] += 1
             cvss_skip_count += 1
+            if explain:
+                logging.info(
+                    "[EXPLAIN] {} skipped: CVSS {} below threshold {}"
+                    .format(cve_id, cvss_score, min_cvss)
+                )
+            else:
+                logging.debug(
+                    "[{}] {} matched {} but CVSS {} < min_cvss {}, skipping"
+                    .format(mode_name, cve_id, vendor,
+                            cvss_score, min_cvss)
+                )
             continue
 
         # Determine status (new vs updated)
@@ -820,70 +839,82 @@ def parse_and_alert(config, days=1, digest_mode=False):
 
     # Realtime mode: send individual emails per CVE
     if not digest_mode and realtime_alerts:
-            for alert in realtime_alerts:
-                status_label = "🆕 NEW" if alert["status"] == "new" else "🔄 UPDATED"
-                subject = (
-                    f"[CVE Alert] {status_label} {alert['cve_id']} "
-                    f"({alert['vendor']}) - CVSS {alert['cvss_score']}"
-                )
-
-                # Generate entry HTML dynamically (fixes KeyError)
-                entry_html = generate_entry_html(alert)
-
-                html_body = f"""
-                <html>
-                <head>
-                <style>
-                    body {{ font-family: Arial, sans-serif; line-height:1.5; color:#333; }}
-                    .cve-entry {{ border:1px solid #ddd; margin:10px 0; padding:15px;
-                                border-radius:6px; background:#fafafa; }}
-                    .cve-entry.updated {{ border-left:4px solid #2196f3; background:#f5faff; }}
-                    .cve-header {{ font-weight:bold; font-size:16px; color:#1a237e; margin-bottom:10px; }}
-                    .badge {{ padding:2px 6px; border-radius:4px; font-weight:bold; font-size:12px; }}
-                    .critical {{ background:#d32f2f; color:white; }}
-                    .high {{ background:#f57c00; color:white; }}
-                    .medium {{ background:#fbc02d; color:black; }}
-                    .low {{ background:#388e3c; color:white; }}
-                    .na {{ background:#9e9e9e; color:white; }}
-                    ul {{ margin:5px 0 5px 15px; }}
-                </style>
-                </head>
-                <body>
-                <h1>⚠️ CVE Alert: {alert['cve_id']}</h1>
-                {entry_html}
-                </body>
-                </html>
-                """
-
-                logging.debug(
-                    f"[{mode_name}] Sending realtime alert for "
-                    f"{alert['cve_id']} to {config['email']['realtime_recipients']}"
-                )
-
-                send_email(
-                    subject,
-                    html_body,
-                    config["email"]["realtime_recipients"],
-                    config,
-                )
-
-                metrics["cves_sent"] += 1
-
-            logging.info(
-                f"[{mode_name}] Sent {len(realtime_alerts)} "
-                f"individual CVE alerts to "
-                f"{config['email']['realtime_recipients']}"
+        for alert in realtime_alerts:
+            status_label = "🆕 NEW" if alert["status"] == "new" else "🔄 UPDATED"
+            subject = (
+                f"[CVE Alert] {status_label} {alert['cve_id']} "
+                f"({alert['vendor']}) - CVSS {alert['cvss_score']}"
             )
+
+            # Generate entry HTML dynamically (fixes KeyError)
+            entry_html = generate_entry_html(alert)
+
+            html_body = f"""
+            <html>
+            <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height:1.5; color:#333; }}
+                .cve-entry {{ border:1px solid #ddd; margin:10px 0; padding:15px;
+                            border-radius:6px; background:#fafafa; }}
+                .cve-entry.updated {{ border-left:4px solid #2196f3; background:#f5faff; }}
+                .cve-header {{ font-weight:bold; font-size:16px; color:#1a237e; margin-bottom:10px; }}
+                .badge {{ padding:2px 6px; border-radius:4px; font-weight:bold; font-size:12px; }}
+                .critical {{ background:#d32f2f; color:white; }}
+                .high {{ background:#f57c00; color:white; }}
+                .medium {{ background:#fbc02d; color:black; }}
+                .low {{ background:#388e3c; color:white; }}
+                .na {{ background:#9e9e9e; color:white; }}
+                ul {{ margin:5px 0 5px 15px; }}
+            </style>
+            </head>
+            <body>
+            <h1>⚠️ CVE Alert: {alert['cve_id']}</h1>
+            {entry_html}
+            </body>
+            </html>
+            """
+
+            logging.debug(
+                f"[{mode_name}] Sending realtime alert for "
+                f"{alert['cve_id']} to {config['email']['realtime_recipients']}"
+            )
+
+            send_email(
+                subject,
+                html_body,
+                config["email"]["realtime_recipients"],
+                config,
+            )
+
+            metrics["cves_sent"] += 1
+
+        logging.info(
+            f"[{mode_name}] Sent {len(realtime_alerts)} "
+            f"individual CVE alerts to "
+            f"{config['email']['realtime_recipients']}"
+        )
+    elif not digest_mode:
+        logging.info(
+            f"[{mode_name}] No new/updated CVEs to send - "
+            f"no realtime alerts generated"
+    )
 
 # ---------------- Main ----------------
 def main():
     global log_warnings
     parser = argparse.ArgumentParser(description="CVE Alert Script")
-    parser.add_argument("--digest", action="store_true", help="Run in digest mode (daily summary)")
-    parser.add_argument("--realtime", action="store_true", help="Run in realtime alert mode (per CVE)")
-    parser.add_argument("--dump-cpes", action="store_true", help="Dump vendor:product:version combinations")
-    parser.add_argument("--validate-filters", action="store_true", help="Validate configured filters against actual CPE data")
-    parser.add_argument("--days", type=int, default=1, help="How many past days of CVEs to query (default=1)")
+    parser.add_argument("--digest", action="store_true",
+                        help="Run in digest mode (daily summary)")
+    parser.add_argument("--realtime", action="store_true",
+                        help="Run in realtime alert mode (per CVE)")
+    parser.add_argument("--dump-cpes", action="store_true",
+                        help="Dump vendor:product:version combinations")
+    parser.add_argument("--validate-filters", action="store_true",
+                        help="Validate configured filters against actual CPE data")
+    parser.add_argument("--days", type=int, default=1,
+                        help="How many past days of CVEs to query (default=1)")
+    parser.add_argument("--explain", action="store_true",
+                        help="Explain why CVEs were filtered out (diagnostic mode)")
     args = parser.parse_args()
 
     config = load_config()
@@ -891,17 +922,27 @@ def main():
 
     try:
         if args.validate_filters:
-            validate_filters(config, days=args.days if args.days > 1 else 90)
+            validate_filters(config,
+                             days=args.days if args.days > 1 else 90)
         elif args.dump_cpes:
             dump_cpes(config, days=args.days)
         elif args.digest:
-            parse_and_alert(config, days=args.days, digest_mode=True)
+            parse_and_alert(config,
+                            days=args.days,
+                            digest_mode=True,
+                            explain=args.explain)
         elif args.realtime:
-            parse_and_alert(config, days=args.days, digest_mode=False)
+            parse_and_alert(config,
+                            days=args.days,
+                            digest_mode=False,
+                            explain=args.explain)
         else:
-            logging.warning("No mode selected. Use --digest, --realtime, --dump-cpes, or --validate-filters.")
+            logging.warning(
+                "No mode selected. Use --digest, --realtime, "
+                "--dump-cpes, or --validate-filters."
+            )
     except Exception as e:
-        msg = f"Fatal error in main(): {e}"
+        msg = "Fatal error in main(): {}".format(e)
         logging.critical(msg, exc_info=True)
         log_warnings.append(msg)
     finally:
@@ -909,7 +950,10 @@ def main():
             if log_warnings:
                 send_error_report(config)
         except Exception as e:
-            logging.error(f"Failed sending error report: {e}", exc_info=True)
+            logging.error(
+                "Failed sending error report: {}".format(e),
+                exc_info=True
+            )
 
 if __name__ == "__main__":
     main()
