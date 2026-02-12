@@ -820,42 +820,60 @@ def parse_and_alert(config, days=1, digest_mode=False):
 
     # Realtime mode: send individual emails per CVE
     if not digest_mode and realtime_alerts:
-        for alert in realtime_alerts:
-            status_label = "🆕 NEW" if alert["status"] == "new" else "🔄 UPDATED"
-            subject = f"[CVE Alert] {status_label} {alert['cve_id']} ({alert['vendor']}) - CVSS {alert['cvss_score']}"
-            
-            html_body = f"""
-            <html>
-            <head>
-              <style>
-                body {{ font-family: Arial, sans-serif; line-height:1.5; color:#333; }}
-                .cve-entry {{ border:1px solid #ddd; margin:10px 0; padding:15px;
-                              border-radius:6px; background:#fafafa; }}
-                .cve-entry.updated {{ border-left:4px solid #2196f3; background:#f5faff; }}
-                .cve-header {{ font-weight:bold; font-size:16px; color:#1a237e; margin-bottom:10px; }}
-                .badge {{ padding:2px 6px; border-radius:4px; font-weight:bold; font-size:12px; }}
-                .critical {{ background:#d32f2f; color:white; }}
-                .high {{ background:#f57c00; color:white; }}
-                .medium {{ background:#fbc02d; color:black; }}
-                .low {{ background:#388e3c; color:white; }}
-                .na {{ background:#9e9e9e; color:white; }}
-                ul {{ margin:5px 0 5px 15px; }}
-              </style>
-            </head>
-            <body>
-              <h1>⚠️ CVE Alert: {alert['cve_id']}</h1>
-              {alert['entry_html']}
-            </body>
-            </html>
-            """
-            
-            logging.debug(f"[{mode_name}] Sending realtime alert for {alert['cve_id']} to {config['email']['realtime_recipients']}")
-            send_email(subject, html_body, config["email"]["realtime_recipients"], config)
-            metrics["cves_sent"] += 1
-        
-        logging.info(f"[{mode_name}] Sent {len(realtime_alerts)} individual CVE alerts to {config['email']['realtime_recipients']}")
-    elif not digest_mode:
-        logging.info(f"[{mode_name}] No new/updated CVEs to send - no realtime alerts generated")
+            for alert in realtime_alerts:
+                status_label = "🆕 NEW" if alert["status"] == "new" else "🔄 UPDATED"
+                subject = (
+                    f"[CVE Alert] {status_label} {alert['cve_id']} "
+                    f"({alert['vendor']}) - CVSS {alert['cvss_score']}"
+                )
+
+                # Generate entry HTML dynamically (fixes KeyError)
+                entry_html = generate_entry_html(alert)
+
+                html_body = f"""
+                <html>
+                <head>
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height:1.5; color:#333; }}
+                    .cve-entry {{ border:1px solid #ddd; margin:10px 0; padding:15px;
+                                border-radius:6px; background:#fafafa; }}
+                    .cve-entry.updated {{ border-left:4px solid #2196f3; background:#f5faff; }}
+                    .cve-header {{ font-weight:bold; font-size:16px; color:#1a237e; margin-bottom:10px; }}
+                    .badge {{ padding:2px 6px; border-radius:4px; font-weight:bold; font-size:12px; }}
+                    .critical {{ background:#d32f2f; color:white; }}
+                    .high {{ background:#f57c00; color:white; }}
+                    .medium {{ background:#fbc02d; color:black; }}
+                    .low {{ background:#388e3c; color:white; }}
+                    .na {{ background:#9e9e9e; color:white; }}
+                    ul {{ margin:5px 0 5px 15px; }}
+                </style>
+                </head>
+                <body>
+                <h1>⚠️ CVE Alert: {alert['cve_id']}</h1>
+                {entry_html}
+                </body>
+                </html>
+                """
+
+                logging.debug(
+                    f"[{mode_name}] Sending realtime alert for "
+                    f"{alert['cve_id']} to {config['email']['realtime_recipients']}"
+                )
+
+                send_email(
+                    subject,
+                    html_body,
+                    config["email"]["realtime_recipients"],
+                    config,
+                )
+
+                metrics["cves_sent"] += 1
+
+            logging.info(
+                f"[{mode_name}] Sent {len(realtime_alerts)} "
+                f"individual CVE alerts to "
+                f"{config['email']['realtime_recipients']}"
+            )
 
 # ---------------- Main ----------------
 def main():
