@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 import re
+import time
 from logging.handlers import TimedRotatingFileHandler, RotatingFileHandler
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -165,7 +166,7 @@ def send_error_report(config):
 
 # --------- Dump cpes for testing ------------
 def dump_cpes(config, days=1):
-    data = fetch_recent_cves(days)
+    data = fetch_recent_cves(config, days)
     if not data:
         return
 
@@ -214,7 +215,7 @@ def dump_cpes(config, days=1):
 def validate_filters(config, days=90):
     """Validate configured filters against actual CPE data and suggest corrections."""
     print(f"\n🔍 Validating filters against {days} days of CVE data...")
-    data = fetch_recent_cves(days)
+    data = fetch_recent_cves(config, days)
     if not data:
         print("❌ Failed to fetch CVE data")
         return
@@ -386,7 +387,11 @@ def validate_filters(config, days=90):
     print(f"\n💡 Tip: Run with --dump-cpes --days {days} to see all available vendor:product combinations")
 
 # ---------------- CVE Handling ----------------
-def fetch_recent_cves(days=1):
+def fetch_recent_cves(config, days=1):
+    api_cfg = config.get("api", {})
+    retry_limit = api_cfg.get("retry_limit", 3)
+    retry_delay = api_cfg.get("retry_delay", 60)
+
     try:
         now = datetime.utcnow().replace(tzinfo=timezone.utc)
         start = now - timedelta(days=days)
@@ -412,8 +417,21 @@ def fetch_recent_cves(days=1):
                     "startIndex": start_index,
                 }
 
-                response = requests.get(NVD_API, params=params, timeout=30)
-                response.raise_for_status()
+                # Retry logic for the request
+                response = None
+                for attempt in range(retry_limit + 1):
+                    try:
+                        response = requests.get(NVD_API, params=params, timeout=30)
+                        response.raise_for_status()
+                        break # Success
+                    except Exception as req_err:
+                        if attempt < retry_limit:
+                            logging.warning(f"API request failed (attempt {attempt+1}/{retry_limit+1}): {req_err}. Retrying in {retry_delay}s...")
+                            time.sleep(retry_delay)
+                        else:
+                            logging.error(f"API request failed after {retry_limit+1} attempts: {req_err}")
+                            raise # Re-raise to be caught by outer try-except
+
                 data = response.json()
 
                 vulns = data.get("vulnerabilities", [])
@@ -576,7 +594,7 @@ def parse_and_alert(config, days=1, digest_mode=False, explain=False, dry_run=Fa
     seen = load_seen(state_file)
     logging.debug(f"[{mode_name}] Loaded {len(seen)} previously seen CVEs from state file")
     
-    data = fetch_recent_cves(days)
+    data = fetch_recent_cves(config, days)
     if not data:
         logging.warning(f"[{mode_name}] No CVE data returned from API, exiting")
         return

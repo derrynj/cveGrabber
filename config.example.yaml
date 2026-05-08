@@ -19,6 +19,11 @@ email:
   email_from: "cve-alerts@example.com"
   subject_template: "[CVE Digest] {count} New CVEs ({date})"
 
+api:
+  # Retry logic for NVD API downtime/errors
+  retry_limit: 3
+  retry_delay: 60  # seconds between retries
+
 logging:
   log_file: "/var/log/cve_alert.log"
   # DEBUG, INFO, WARNING, ERROR
